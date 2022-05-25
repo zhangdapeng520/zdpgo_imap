@@ -1,5 +1,7 @@
 package zdpgo_imap
 
+import "time"
+
 /*
 @Time : 2022/5/24 20:46
 @Author : 张大鹏
@@ -14,6 +16,8 @@ type Result struct {
 	CcEmails    []string            `json:"cc_emails"`
 	BccEmails   []string            `json:"bcc_emails"`
 	Date        int                 `json:"date"`
+	DateStr     string              `json:"date_str"`
+	DateTime    time.Time           `json:"date_time"`
 	Key         string              `json:"key"`
 	Title       string              `json:"title"`
 	Body        string              `json:"body"`

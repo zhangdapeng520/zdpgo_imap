@@ -212,6 +212,97 @@ func (i *Imap) SearchByTitle(title string) {
 	}
 }
 
+func (i *Imap) SearchByRecent(recentNum uint32) {
+	i.Results = []*Result{}
+
+	// 连接邮件服务器
+	i.InitClient()
+	defer func(Client *client.Client) {
+		err := Client.Logout()
+		if err != nil {
+			i.Log.Error("关闭邮件IMAP客户端失败", "error", err)
+		}
+	}(i.Client)
+
+	// 选择收件箱
+	mbox, err := i.Client.Select("INBOX", false)
+	if err != nil {
+		i.Log.Error("获取收件箱失败", "error", err)
+		return
+	}
+
+	// 获取近指定数量封邮件
+	from := recentNum
+	to := mbox.Messages
+	if mbox.Messages > recentNum {
+		from = mbox.Messages - recentNum
+	}
+	seqSet := new(imap.SeqSet) // 索引集合
+	seqSet.AddRange(from, to)  // 设置邮件搜索范围
+
+	// 执行查询
+	messages := make(chan *imap.Message, 10)
+	done := make(chan error, 1)
+	go func() {
+		// 抓取邮件消息体传入到messages信道
+		searchItems := []imap.FetchItem{
+			imap.FetchEnvelope,     // 邮件信息
+			imap.FetchInternalDate, // 时间
+		}
+		done <- i.Client.Fetch(seqSet, searchItems, messages)
+	}()
+
+	for msg := range messages {
+		i.SetResultBasic(msg)
+		i.Results = append(i.Results, i.Result)
+	}
+
+	if err = <-done; err != nil {
+		i.Log.Error("执行查询失败", "error", err)
+		return
+	}
+}
+
+// SetResultBasic 设置结果的基本信息
+func (i *Imap) SetResultBasic(message *imap.Message) {
+	i.Result = &Result{
+		Title:    message.Envelope.Subject,
+		SeqNum:   message.SeqNum,
+		Size:     message.Size,
+		Flags:    message.Flags,
+		DateTime: message.InternalDate,
+		Date:     int(message.InternalDate.Unix()),
+		DateStr:  message.InternalDate.Format("2006-01-02 15:04:05"),
+	}
+
+	// 发件人
+	for _, from := range message.Envelope.From {
+		i.Result.From = from.Address()
+		break
+	}
+
+	// 收件人
+	var toEmails []string
+	for _, to := range message.Envelope.To {
+		toEmails = append(toEmails, to.Address())
+	}
+	i.Result.ToEmails = toEmails
+
+	// 抄送
+	var ccEmails []string
+	for _, to := range message.Envelope.Cc {
+		ccEmails = append(ccEmails, to.Address())
+	}
+	i.Result.CcEmails = ccEmails
+
+	// 密送
+	var bccEmails []string
+	for _, to := range message.Envelope.Bcc {
+		bccEmails = append(bccEmails, to.Address())
+	}
+	i.Result.BccEmails = bccEmails
+}
+
 // SetResult 处理查询结果
 func (i *Imap) SetResult(message *imap.Message, mailReader *mail.Reader) error {
 	// 处理邮件
