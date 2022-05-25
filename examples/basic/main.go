@@ -23,9 +23,14 @@ var (
 )
 
 func main() {
-	//ic.SearchByTitle("") // 搜索所有的邮件
-	ic.SearchByRecent(10) // 搜索最近10封邮件
+	ic.SearchByTitle("") // 搜索所有的邮件
+	if ic.Results != nil && len(ic.Results) > 0 {
+		for _, result := range ic.Results {
+			ic.Log.Debug("结果", "title", result.Title, "date", result.DateStr)
+		}
+	}
 
+	ic.SearchByRecent(10) // 搜索最近10封邮件
 	if ic.Results != nil && len(ic.Results) > 0 {
 		for _, result := range ic.Results {
 			ic.Log.Debug("结果", "title", result.Title, "date", result.DateStr)

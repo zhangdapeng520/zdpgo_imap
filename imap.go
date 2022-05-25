@@ -2,10 +2,10 @@ package zdpgo_imap
 
 import (
 	"fmt"
-	"github.com/emersion/go-imap"
-	"github.com/emersion/go-imap/client"
-	"github.com/emersion/go-message/charset"
-	"github.com/emersion/go-message/mail"
+	"github.com/zhangdapeng520/zdpgo_imap/imap"
+	"github.com/zhangdapeng520/zdpgo_imap/imap/client"
+	"github.com/zhangdapeng520/zdpgo_imap/message/charset"
+	"github.com/zhangdapeng520/zdpgo_imap/message/mail"
 	"github.com/zhangdapeng520/zdpgo_log"
 	"io"
 	"io/ioutil"
@@ -54,7 +54,7 @@ func (i *Imap) InitClient() {
 	var err error
 
 	// 【字符集】  处理us-ascii和utf-8以外的字符集(例如gbk,gb2313等)时, 需要加上这行代码。
-	// 【参考】 https://github.com/emersion/go-imap/wiki/Charset-handling
+	// 【参考】 https://github.com/zhangdapeng520/zdpgo_imap/imap/wiki/Charset-handling
 	imap.CharsetReader = charset.Reader
 
 	// 连接邮件服务器
@@ -74,7 +74,7 @@ func (i *Imap) InitClient() {
 func (i *Imap) IsHealth() bool {
 	var err error
 	// 【字符集】  处理us-ascii和utf-8以外的字符集(例如gbk,gb2313等)时, 需要加上这行代码。
-	// 【参考】 https://github.com/emersion/go-imap/wiki/Charset-handling
+	// 【参考】 https://github.com/zhangdapeng520/zdpgo_imap/imap/wiki/Charset-handling
 	imap.CharsetReader = charset.Reader
 
 	// 连接邮件服务器
@@ -159,7 +159,7 @@ func (i *Imap) SearchByTitle(title string) {
 			if err != nil {
 				// 【实践经验】这里遇到过的err信息是：ENVELOPE doesn't contain 10 fields
 				// 原因是对方发送的邮件格式不规范，解析失败
-				// 相关的issue: https://github.com/emersion/go-imap/issues/143
+				// 相关的issue: https://github.com/zhangdapeng520/zdpgo_imap/imap/issues/143
 				i.Log.Error("抓取邮件内容失败", "error", err, "seqSet", seqSet)
 			}
 		}()
@@ -305,51 +305,14 @@ func (i *Imap) SetResultBasic(message *imap.Message) {
 
 // SetResult 处理查询结果
 func (i *Imap) SetResult(message *imap.Message, mailReader *mail.Reader) error {
-	// 处理邮件
-	i.Log.Debug("设置查询结果", "seqNum", message.SeqNum, "size", message.Size, "flags", message.Flags, "title",
-		message.Envelope.Subject)
-
-	i.Result = &Result{
-		Title:  message.Envelope.Subject,
-		SeqNum: message.SeqNum,
-		Size:   message.Size,
-		Flags:  message.Flags,
-	}
-
-	// 发件人
-	for _, from := range message.Envelope.From {
-		i.Result.From = from.Address()
-		break
-	}
-
-	// 收件人
-	var toEmails []string
-	for _, to := range message.Envelope.To {
-		toEmails = append(toEmails, to.Address())
-	}
-	i.Result.ToEmails = toEmails
-
-	// 抄送
-	var ccEmails []string
-	for _, to := range message.Envelope.Cc {
-		ccEmails = append(ccEmails, to.Address())
-	}
-	i.Result.CcEmails = ccEmails
-
-	// 密送
-	var bccEmails []string
-	for _, to := range message.Envelope.Bcc {
-		bccEmails = append(bccEmails, to.Address())
-	}
-	i.Result.BccEmails = bccEmails
-
-	// Key
 	var (
 		err      error
 		part     *mail.Part
 		body     []byte
 		filename string
 	)
+
+	i.SetResultBasic(message)
 
 	// 处理消息体的每个part
 	for {
