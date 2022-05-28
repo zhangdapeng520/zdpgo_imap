@@ -2,14 +2,16 @@ package zdpgo_imap
 
 import (
 	"fmt"
+	"io"
+	"io/ioutil"
+	"strings"
+	"time"
+
 	"github.com/zhangdapeng520/zdpgo_imap/imap"
 	"github.com/zhangdapeng520/zdpgo_imap/imap/client"
 	"github.com/zhangdapeng520/zdpgo_imap/message/charset"
 	"github.com/zhangdapeng520/zdpgo_imap/message/mail"
 	"github.com/zhangdapeng520/zdpgo_log"
-	"io"
-	"io/ioutil"
-	"strings"
 )
 
 /*
@@ -21,11 +23,13 @@ import (
 */
 
 type Imap struct {
-	Config  *Config
-	Result  *Result
-	Results []*Result
-	Client  *client.Client
-	Log     *zdpgo_log.Log
+	Config         *Config
+	Result         *Result
+	Results        []*Result
+	All            []*Result // 存储所有的邮件
+	LastSearchTime time.Time // 最近一次搜索
+	Client         *client.Client
+	Log            *zdpgo_log.Log
 }
 
 func New() *Imap {
@@ -106,8 +110,13 @@ func (i *Imap) IsHealth() bool {
 // fetch方法执行耗时可能会很长, 因此可以分两次fetch处理，减少处理时长：
 // 1)第一次fetch先使用ENVELOP或者RFC822.HEADER获取邮件头信息找到满足业务需求邮件的id
 // 2)第二次fetch根据这个邮件id使用'RFC822'获取邮件MIME内容，下载附件
-func (i *Imap) SearchByTitle(title string) {
-	i.Results = []*Result{}
+func (i *Imap) SearchByTitle(title string) ([]*Result, error) {
+	// 如果距离最近一次搜索不超过30秒钟，则使用最近搜索的数据
+	now := time.Now()
+	diffTime := now.Sub(i.LastSearchTime).Seconds()
+	if diffTime < 10 {
+		return i.All, nil
+	}
 
 	// 连接邮件服务器
 	i.InitClient()
@@ -122,7 +131,7 @@ func (i *Imap) SearchByTitle(title string) {
 	_, err := i.Client.Select("INBOX", false)
 	if err != nil {
 		i.Log.Error("选择收件箱失败", "error", err)
-		return
+		return nil, err
 	}
 
 	// 搜索条件实例对象
@@ -136,13 +145,14 @@ func (i *Imap) SearchByTitle(title string) {
 	ids, err := i.Client.Search(criteria)
 	if err != nil {
 		i.Log.Error("搜索邮件失败", "error", err)
-		return
+		return nil, err
 	}
 
 	// 片段
 	var section imap.BodySectionName
 
-	// 遍历邮件
+	// 遍历邮件，进行搜索
+	var results []*Result
 	for {
 		if len(ids) == 0 {
 			break
@@ -169,7 +179,6 @@ func (i *Imap) SearchByTitle(title string) {
 			i.Log.Warning("邮件服务器没有返回消息内容", "message", message)
 			continue
 		}
-		i.Log.Debug("正在查找邮件", "SeqNum", message.SeqNum, "size", message.Size, "flags", message.Flags, "title", message.Envelope.Subject)
 
 		// 如果包含要查找的标题，则进一步搜索内容
 		if strings.Contains(message.Envelope.Subject, title) {
@@ -186,35 +195,50 @@ func (i *Imap) SearchByTitle(title string) {
 			msg := <-chanMsg
 			if msg == nil {
 				i.Log.Error("返回的邮件消息为空", "msg", msg)
-				return
+				return nil, err
 			}
 
 			sectionName := msg.GetBody(&section)
 			if sectionName == nil {
 				i.Log.Error("获取片段名称失败", "sectionName", sectionName)
-				return
+				return nil, err
 			}
 
 			// 创建邮件阅读器
 			mailReader, err1 := mail.CreateReader(sectionName)
 			if err1 != nil {
 				i.Log.Error("创建邮件阅读器失败", "error", err)
-				return
+				return nil, err1
 			}
 
 			// 设置邮件查询结果
-			err = i.SetResult(message, mailReader)
+			result, err := i.GetResult(message, mailReader)
 			if err != nil {
 				i.Log.Error("设置查询结果失败", "error", err)
-				return
+				return nil, err
 			}
+			results = append(results, result)
 		}
 	}
+
+	// 同步到全部结果
+	i.LastSearchTime = time.Now()
+	i.All = results
+	return results, nil
 }
 
-func (i *Imap) SearchByRecent(recentNum uint32) {
-	i.Results = []*Result{}
+// SearchByContent 根据内容搜索
+func (i *Imap) SearchByContent(searchContent string) ([]*Result, error) {
+	results, err := i.SearchByTitle("") // 搜索所有的邮件
+	if err != nil {
+		i.Log.Error("搜索邮件失败", "error", err)
+		return nil, err
+	}
+	return results, nil
+}
 
+// 搜索最近的指定数量的邮件
+func (i *Imap) SearchByRecent(recentNum uint32) ([]*Result, error) {
 	// 连接邮件服务器
 	i.InitClient()
 	defer func(Client *client.Client) {
@@ -228,7 +252,7 @@ func (i *Imap) SearchByRecent(recentNum uint32) {
 	mbox, err := i.Client.Select("INBOX", false)
 	if err != nil {
 		i.Log.Error("获取收件箱失败", "error", err)
-		return
+		return nil, err
 	}
 
 	// 获取近指定数量封邮件
@@ -252,20 +276,25 @@ func (i *Imap) SearchByRecent(recentNum uint32) {
 		done <- i.Client.Fetch(seqSet, searchItems, messages)
 	}()
 
+	// 处理查询结果
+	var results []*Result
 	for msg := range messages {
-		i.SetResultBasic(msg)
-		i.Results = append(i.Results, i.Result)
+		result := i.GetBasicResult(msg)
+		results = append(results, result)
 	}
 
 	if err = <-done; err != nil {
 		i.Log.Error("执行查询失败", "error", err)
-		return
+		return nil, err
 	}
+
+	// 返回结果
+	return results, nil
 }
 
-// SetResultBasic 设置结果的基本信息
-func (i *Imap) SetResultBasic(message *imap.Message) {
-	i.Result = &Result{
+// GetBasicResult 获取基本结果信息
+func (i *Imap) GetBasicResult(message *imap.Message) *Result {
+	result := &Result{
 		Title:    message.Envelope.Subject,
 		SeqNum:   message.SeqNum,
 		Size:     message.Size,
@@ -277,7 +306,7 @@ func (i *Imap) SetResultBasic(message *imap.Message) {
 
 	// 发件人
 	for _, from := range message.Envelope.From {
-		i.Result.From = from.Address()
+		result.From = from.Address()
 		break
 	}
 
@@ -286,25 +315,29 @@ func (i *Imap) SetResultBasic(message *imap.Message) {
 	for _, to := range message.Envelope.To {
 		toEmails = append(toEmails, to.Address())
 	}
-	i.Result.ToEmails = toEmails
+	result.ToEmails = toEmails
 
 	// 抄送
 	var ccEmails []string
 	for _, to := range message.Envelope.Cc {
 		ccEmails = append(ccEmails, to.Address())
 	}
-	i.Result.CcEmails = ccEmails
+	result.CcEmails = ccEmails
 
 	// 密送
 	var bccEmails []string
 	for _, to := range message.Envelope.Bcc {
 		bccEmails = append(bccEmails, to.Address())
 	}
-	i.Result.BccEmails = bccEmails
+	result.BccEmails = bccEmails
+
+	// 返回
+	return result
 }
 
-// SetResult 处理查询结果
-func (i *Imap) SetResult(message *imap.Message, mailReader *mail.Reader) error {
+// GetResult 获取查询结果
+func (i *Imap) GetResult(message *imap.Message,
+	mailReader *mail.Reader) (*Result, error) {
 	var (
 		err      error
 		part     *mail.Part
@@ -312,7 +345,7 @@ func (i *Imap) SetResult(message *imap.Message, mailReader *mail.Reader) error {
 		filename string
 	)
 
-	i.SetResultBasic(message)
+	result := i.GetBasicResult(message)
 
 	// 处理消息体的每个part
 	for {
@@ -325,39 +358,36 @@ func (i *Imap) SetResult(message *imap.Message, mailReader *mail.Reader) error {
 		switch h := part.Header.(type) {
 		case *mail.Header:
 			// 获取请求头信息
-			i.Result.Key = h.Get("X-ZdpgoEmail-Auther")
+			result.Key = h.Get("X-ZdpgoEmail-Auther")
 		case *mail.InlineHeader:
 			// 获取正文内容, text或者html
 			body, err = ioutil.ReadAll(part.Body)
 			if err != nil {
 				i.Log.Error("获取正文内容失败", "error", err)
-				return err
+				return nil, err
 			}
-			i.Result.Body = string(body)
+			result.Body = string(body)
 		case *mail.AttachmentHeader:
 			// 下载附件
 			filename, err = h.Filename()
 			if err != nil {
 				i.Log.Error("获取附件名称失败", "error", err)
-				return err
+				return nil, err
 			}
 			if filename != "" {
 				body, err = ioutil.ReadAll(part.Body)
 				if err != nil && err != io.EOF {
 					i.Log.Warning("读取附件内容失败", "error", err, "filename", filename, "body", body)
 				}
-				i.Result.Attachments = append(i.Result.Attachments, map[string][]byte{
+				result.Attachments = append(result.Attachments, map[string][]byte{
 					filename: body,
 				})
 			}
 		}
 	}
 
-	// 追加
-	i.Results = append(i.Results, i.Result)
-
 	// 返回
-	return nil
+	return result, nil
 }
 
 func pop(list *[]uint32) uint32 {
